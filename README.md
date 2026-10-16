@@ -1,4 +1,5 @@
 # Groq & web search checker
+Updated: tests `openai/gpt-oss-120b` with the `browser_search` tool (Groq retired `groq/compound` and `compound-mini` on 21 Sep 2026) and has a free "List models my key can use" button.
 
 One static page, no server. Tests the models Creator Booth uses for web research and backup answers.
 

@@ -23,14 +23,15 @@ button.sec{background:transparent;color:var(--text);border:1px solid var(--line)
 details summary{cursor:pointer;color:var(--dim);font-size:13px}.verdict{border:1px solid var(--accent);border-radius:12px;padding:14px;margin-top:12px;font-size:14px}
 </style></head><body>
 <h1>Groq &amp; web search checker</h1>
-<p>Tests the research step of Creator Booth: the same models, the same instructions, the same wait limits. Nothing is saved. Each research test uses 1 Groq request (and one plain test per model uses 1 more).</p>
+<p>Tests the research step of Creator Booth: the same models, the same instructions, the same wait limits. Nothing is saved. Each research test uses 1 Groq request (and one plain test per model uses 1 more). Listing models is free.</p>
 
 <div class="card"><h2>1. Where to test</h2>
 <label>Your site (tests exactly what the app does)</label>
 <input type="text" id="site" value="https://creator-boot.vercel.app" autocapitalize="off" autocorrect="off">
 <label>Groq key (optional: also tests Groq directly, which separates a Groq problem from a Vercel problem). Used only while this page is open, sent only to Groq.</label>
 <input type="password" id="key" placeholder="gsk_…" autocomplete="off">
-<div class="row"><button id="proxyBtn" class="sec">Check my site's Groq proxy (free)</button></div>
+<div class="row"><button id="proxyBtn" class="sec">Check my site's Groq proxy (free)</button><button id="listBtn" class="sec">List models my key can use (free)</button></div>
+<pre id="listOut" style="display:none"></pre>
 <div id="proxyOut" class="note" style="margin-top:10px"></div></div>
 
 <div class="card"><h2>2. Models and question</h2>
@@ -52,13 +53,14 @@ details summary{cursor:pointer;color:var(--dim);font-size:13px}.verdict{border:1
 
 <script>
 const MODELS = [
-  ['groq/compound-mini','Short research (fast, one search)'],
-  ['groq/compound','Deep / Debate research (several searches)'],
-  ['openai/gpt-oss-120b','Backup AI and small helper tasks'],
-  ['meta-llama/llama-4-scout-17b-16e-instruct','Backup AI when an image is attached']
+  ['openai/gpt-oss-120b','Backup AI, helper tasks, and the candidate for web research (browser_search tool)'],
+  ['openai/gpt-oss-20b','Smaller, faster candidate for web research'],
+  ['groq/compound-mini','Old Short research. Groq retired it on 21 Sep 2026 (a 404 is expected)'],
+  ['groq/compound','Old Deep research. Groq retired it on 21 Sep 2026 (a 404 is expected)'],
+  ['meta-llama/llama-4-scout-17b-16e-instruct','Old image backup. Groq retired it on 17 Jul 2026 (a 404 is expected)']
 ];
 const $ = id => document.getElementById(id);
-$('models').innerHTML = MODELS.map(([m,d],i)=>`<label class="chk"><input type="checkbox" data-m="${m}" ${i<3?'checked':''}><span><code>${m}</code><br><span class="note">${d}</span></span></label>`).join('');
+$('models').innerHTML = MODELS.map(([m,d],i)=>`<label class="chk"><input type="checkbox" data-m="${m}" ${i<2?'checked':''}><span><code>${m}</code><br><span class="note">${d}</span></span></label>`).join('');
 const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let stop = false, ctl = null, report = [];
 const TIMEOUT = 90000;
@@ -72,7 +74,7 @@ Work like this:
 3. Write a research brief in plain text, at most 260 words: the confirmed facts with dates; then who said what, naming the person or outlet ONLY when you actually found it; then the main camps; then what is still unverified.
 4. Never invent a quote, source, name or statistic. If you cannot find something, say exactly that.`;
 }
-async function call(mode, model, messages){
+async function call(mode, model, messages, extra){
   const t0 = performance.now(); ctl = new AbortController();
   const timer = setTimeout(()=>ctl.abort(), TIMEOUT);
   const out = {ms:0,status:0,data:null,raw:'',err:'',headers:{}};
@@ -80,7 +82,7 @@ async function call(mode, model, messages){
     const direct = mode === 'direct';
     const url = direct ? 'https://api.groq.com/openai/v1/chat/completions' : $('site').value.replace(/\/+$/,'') + '/api/groq';
     const headers = {'Content-Type':'application/json'}; if(direct) headers.Authorization = 'Bearer ' + $('key').value.trim();
-    const r = await fetch(url,{method:'POST',headers,body:JSON.stringify({model,messages}),signal:ctl.signal});
+    const r = await fetch(url,{method:'POST',headers,body:JSON.stringify(Object.assign({model,messages},extra||{})),signal:ctl.signal});
     out.status = r.status; out.raw = await r.text();
     try{ out.data = JSON.parse(out.raw); }catch(e){}
     ['x-ratelimit-remaining-requests','x-ratelimit-remaining-tokens','x-ratelimit-limit-requests','x-ratelimit-limit-tokens','retry-after'].forEach(h=>{ const v=r.headers.get(h); if(v) out.headers[h]=v; });
@@ -134,12 +136,16 @@ async function runTests(){
   let n=0; const total=models.length*modes.length;
   for(const model of models){ for(const mode of modes){
     if(stop) break; n++; $('prog').textContent=`Testing ${model} (${mode==='direct'?'direct':'site'}) · ${n} of ${total}…`;
-    const row={model,mode,tests:[]}; report.push(row); const isSearchModel=/^groq\/compound/.test(model); let plainOk=true;
+    const row={model,mode,tests:[]}; report.push(row); const isSearchModel=/^(groq\/compound|openai\/gpt-oss-(120|20)b)/.test(model); const isGpt=/^openai\/gpt-oss/.test(model); let plainOk=true;
     if($('plain').checked){ const o=await call(mode,model,[{role:'user',content:'Reply with the single word OK.'}]); const c=classify(o,false); row.tests.push({label:'Plain answer',o,c}); plainOk=c.k==='ok'; render(); }
     if(!stop && plainOk && isSearchModel){
       $('prog').textContent=`Research test: ${model} (${mode==='direct'?'direct':'site'}), can take up to 90 s…`;
-      const o=await call(mode,model,[{role:'system',content:researchPrompt()},{role:'user',content:$('q').value.slice(0,700)}]); const c=classify(o,true);
-      row.tests.push({label:'Web research',o,c,research:true}); render();
+      const msgs=[{role:'system',content:researchPrompt()},{role:'user',content:$('q').value.slice(0,700)}];
+      const o=await call(mode,model,msgs,isGpt?{tools:[{type:'browser_search'}]}:null); const c=classify(o,true);
+      row.tests.push({label:isGpt?'Web research (browser_search)':'Web research',o,c,research:true}); render();
+      if(isGpt && mode==='direct' && !stop){ $('prog').textContent='Forced-search variant: '+model+'…';
+        const o2=await call(mode,model,msgs,{tools:[{type:'browser_search'}],tool_choice:'required'}); const c2=classify(o2,true);
+        row.tests.push({label:'Web research (search forced)',o:o2,c:c2,research:true}); render(); }
     } else if(!isSearchModel && !stop){ row.tests.push({label:'Web research',o:{ms:0,headers:{}},c:{k:'idle',t:'Not applicable',why:'This model is not used for searching.'}}); render(); }
   } }
   $('prog').textContent=stop?'Stopped.':'Finished.'; $('runBtn').disabled=false; $('stopBtn').disabled=true; verdict();
@@ -154,6 +160,15 @@ $('proxyBtn').onclick=async()=>{
       : r.status===404 ? 'Got 404: /api/groq is not deployed on that address. Check the site address and that the api folder was in the last deploy.'
       : 'Unexpected answer: HTTP '+r.status+' '+t.slice(0,200);
   }catch(e){ out.textContent='Could not reach the site: '+(e&&e.message||e); }
+};
+$('listBtn').onclick=async()=>{
+  const o=$('listOut'); o.style.display='block'; const k=$('key').value.trim();
+  if(!k){ o.textContent='Paste your Groq key above first.'; return; }
+  o.textContent='Asking Groq…';
+  try{ const r=await fetch('https://api.groq.com/openai/v1/models',{headers:{Authorization:'Bearer '+k}}); const d=await r.json();
+    if(!r.ok){ o.textContent='HTTP '+r.status+' '+JSON.stringify(d).slice(0,400); return; }
+    const ids=(d.data||[]).map(m=>m.id).sort(); o.textContent=ids.length+' models available to this key:\n'+ids.join('\n');
+  }catch(e){ o.textContent='Could not reach Groq directly: '+(e&&e.message||e); }
 };
 $('copyBtn').onclick=async()=>{
   const txt=report.map(r=>r.model+' ['+r.mode+']\n'+r.tests.map(t=>'  '+t.label+': '+t.c.t+' ('+(t.o.ms/1000).toFixed(1)+' s) '+(t.c.why||'')+(Object.keys(t.o.headers).length?' '+JSON.stringify(t.o.headers):'')).join('\n')).join('\n\n');
