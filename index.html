@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Groq &amp; web search checker</title>
+<style>
+:root{--bg:#0f1716;--card:#16201f;--line:#26403c;--text:#e8f1ef;--dim:#93a8a4;--ok:#5fd6a0;--warn:#e6b450;--bad:#f08a7a;--accent:#4fc3b0}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,sans-serif;padding:16px 16px 60px;max-width:720px;margin:auto}
+h1{font-size:22px;margin:8px 0 4px}h2{font-size:17px;margin:0 0 10px}p,li{color:var(--dim);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:14px 0}
+label{display:block;font-size:13px;color:var(--dim);margin:10px 0 4px}
+input[type=text],input[type=password],textarea{width:100%;background:#0b1211;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit;font-size:14px}
+textarea{min-height:64px}
+button{background:var(--accent);color:#04201b;border:0;border-radius:10px;padding:12px 16px;font:inherit;font-weight:600;cursor:pointer}
+button.sec{background:transparent;color:var(--text);border:1px solid var(--line)}button[disabled]{opacity:.5}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.chk{display:flex;gap:10px;align-items:flex-start;margin:8px 0;color:var(--text);font-size:14px}.chk code{color:var(--accent)}
+.res{border-top:1px solid var(--line);padding:12px 0}.res:first-of-type{border-top:0}
+.m{font-family:ui-monospace,monospace;font-size:14px;word-break:break-all}
+.line{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;margin:6px 0;font-size:14px}
+.badge{border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600}
+.b-ok{background:#143a2c;color:var(--ok)}.b-warn{background:#3d3112;color:var(--warn)}.b-bad{background:#3d1b16;color:var(--bad)}.b-idle{background:#222c2b;color:var(--dim)}
+.note{font-size:13px;color:var(--dim)}pre{white-space:pre-wrap;word-break:break-word;background:#0b1211;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:12.5px;max-height:260px;overflow:auto;margin:6px 0}
+details summary{cursor:pointer;color:var(--dim);font-size:13px}.verdict{border:1px solid var(--accent);border-radius:12px;padding:14px;margin-top:12px;font-size:14px}
+</style></head><body>
+<h1>Groq &amp; web search checker</h1>
+<p>Tests the research step of Creator Booth: the same models, the same instructions, the same wait limits. Nothing is saved. Each research test uses 1 Groq request (and one plain test per model uses 1 more).</p>
+
+<div class="card"><h2>1. Where to test</h2>
+<label>Your site (tests exactly what the app does)</label>
+<input type="text" id="site" value="https://creator-boot.vercel.app" autocapitalize="off" autocorrect="off">
+<label>Groq key (optional: also tests Groq directly, which separates a Groq problem from a Vercel problem). Used only while this page is open, sent only to Groq.</label>
+<input type="password" id="key" placeholder="gsk_…" autocomplete="off">
+<div class="row"><button id="proxyBtn" class="sec">Check my site's Groq proxy (free)</button></div>
+<div id="proxyOut" class="note" style="margin-top:10px"></div></div>
+
+<div class="card"><h2>2. Models and question</h2>
+<div id="models"></div>
+<label>Question for the research test</label>
+<textarea id="q">Who is winning the 2026 Ballon d'Or? What are pundits and fans saying?</textarea>
+<div class="chk"><input type="checkbox" id="plain" checked><span>Also run a plain "reply OK" test first (skips the research test if this fails)</span></div>
+<div class="row"><button id="runBtn">Run tests</button><button id="stopBtn" class="sec" disabled>Stop</button></div>
+<div id="prog" class="note" style="margin-top:10px"></div></div>
+
+<div class="card"><h2>3. Results</h2><div id="out"><p>Nothing yet.</p></div><div id="verdict"></div>
+<div class="row"><button id="copyBtn" class="sec">Copy results</button></div>
+<details style="margin-top:12px"><summary>How to read the results</summary>
+<ul><li><b>Works</b>: answered in under 30 s and (for research) searched.</li>
+<li><b>Works but slow</b>: answered, but the app stops waiting after 30 s (Short) or 50 s (Deep), so the app sees a failure.</li>
+<li><b>No search</b>: answered but did not browse. The app would get an answer with no sources.</li>
+<li><b>Limit reached / Not available / Key problem</b>: Groq refused. The "Full reply" shows Groq's own words.</li>
+<li>If the site test fails but the direct test works, the fault is on Vercel (timeout or proxy). If both fail the same way, it is Groq or the key.</li></ul></details></div>
+
+<script>
+const MODELS = [
+  ['groq/compound-mini','Short research (fast, one search)'],
+  ['groq/compound','Deep / Debate research (several searches)'],
+  ['openai/gpt-oss-120b','Backup AI and small helper tasks'],
+  ['meta-llama/llama-4-scout-17b-16e-instruct','Backup AI when an image is attached']
+];
+const $ = id => document.getElementById(id);
+$('models').innerHTML = MODELS.map(([m,d],i)=>`<label class="chk"><input type="checkbox" data-m="${m}" ${i<3?'checked':''}><span><code>${m}</code><br><span class="note">${d}</span></span></label>`).join('');
+const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let stop = false, ctl = null, report = [];
+const TIMEOUT = 90000;
+
+function researchPrompt(){
+  const today = new Date().toISOString().slice(0,10);
+  return `You are a football research assistant with live web search. Today is ${today}.
+Work like this:
+1. Work out exactly what the message is about: the people, clubs, competition, the season or year, and the specific event.
+2. Run several searches, not one: (a) the facts and timeline; (b) what pundits, players, managers, journalists and fans are SAYING about it; (c) any rumours and the evidence for and against them. Use the current year in your queries.
+3. Write a research brief in plain text, at most 260 words: the confirmed facts with dates; then who said what, naming the person or outlet ONLY when you actually found it; then the main camps; then what is still unverified.
+4. Never invent a quote, source, name or statistic. If you cannot find something, say exactly that.`;
+}
+async function call(mode, model, messages){
+  const t0 = performance.now(); ctl = new AbortController();
+  const timer = setTimeout(()=>ctl.abort(), TIMEOUT);
+  const out = {ms:0,status:0,data:null,raw:'',err:'',headers:{}};
+  try{
+    const direct = mode === 'direct';
+    const url = direct ? 'https://api.groq.com/openai/v1/chat/completions' : $('site').value.replace(/\/+$/,'') + '/api/groq';
+    const headers = {'Content-Type':'application/json'}; if(direct) headers.Authorization = 'Bearer ' + $('key').value.trim();
+    const r = await fetch(url,{method:'POST',headers,body:JSON.stringify({model,messages}),signal:ctl.signal});
+    out.status = r.status; out.raw = await r.text();
+    try{ out.data = JSON.parse(out.raw); }catch(e){}
+    ['x-ratelimit-remaining-requests','x-ratelimit-remaining-tokens','x-ratelimit-limit-requests','x-ratelimit-limit-tokens','retry-after'].forEach(h=>{ const v=r.headers.get(h); if(v) out.headers[h]=v; });
+  }catch(e){ out.err = e && e.name==='AbortError' ? 'no answer after '+(TIMEOUT/1000)+' s' : String(e && e.message || e); }
+  clearTimeout(timer); out.ms = Math.round(performance.now()-t0); return out;
+}
+function classify(o, research){
+  const msg = o.data && o.data.error && (o.data.error.message || o.data.error) || '';
+  if(o.err) return {k:'bad',t: /after \d+ s/.test(o.err)?'Too slow':'No connection', why:o.err};
+  if(o.status>=400){
+    const t = o.status===429||/rate.?limit|quota/i.test(msg)?'Limit reached': (o.status===401||o.status===403)?'Key problem': (o.status===404||/decommission|not found|does not exist|no longer/i.test(msg))?'Not available': /too large|tokens/i.test(msg)?'Too large': o.status>=500?'Groq or proxy error':'Error';
+    return {k:'bad',t,why:'HTTP '+o.status+' '+String(msg).slice(0,300)};
+  }
+  const m = o.data && o.data.choices && o.data.choices[0] && o.data.choices[0].message;
+  const text = String(m && m.content || '').trim();
+  if(!text) return {k:'bad',t:'Empty reply',why:'HTTP 200 but no text'};
+  if(research){
+    const tools = (m.executed_tools||[]); const urls = new Set();
+    tools.forEach(t=>{const rs=t&&t.search_results&&t.search_results.results; if(Array.isArray(rs)) rs.forEach(x=>x&&x.url&&urls.add(x.url));});
+    (text.match(/https?:\/\/[^\s)\]]+/g)||[]).forEach(u=>urls.add(u));
+    const searched = tools.length>0 || urls.size>0;
+    if(!searched) return {k:'warn',t:'No search',why:'It answered but did not browse (no search results or links).',text,sources:0};
+    if(o.ms>30000) return {k:'warn',t:'Works but slow',why:'Took '+(o.ms/1000).toFixed(1)+' s; the app stops waiting at 30 s (Short) / 50 s (Deep).',text,sources:urls.size};
+    return {k:'ok',t:'Works + search',why:urls.size+' source link(s), '+tools.length+' search step(s)',text,sources:urls.size};
+  }
+  return {k:'ok',t:'Works',why:'',text};
+}
+function badge(c){return `<span class="badge b-${c.k}">${esc(c.t)}</span>`}
+function render(){
+  $('out').innerHTML = report.map(r=>`<div class="res"><div class="m">${esc(r.model)} <span class="note">· ${r.mode==='direct'?'direct to Groq':'through your site'}</span></div>`+
+   r.tests.map(t=>`<div class="line"><b>${t.label}:</b> ${badge(t.c)} <span class="note">${(t.o.ms/1000).toFixed(1)} s</span> <span class="note">${esc(t.c.why||'')}</span></div>`+
+   (Object.keys(t.o.headers).length?`<div class="note">Limits Groq reported: ${esc(Object.entries(t.o.headers).map(([k,v])=>k.replace('x-ratelimit-','')+'='+v).join(', '))}</div>`:'')+
+   `<details><summary>Full reply</summary><pre>${esc((t.c.text?('ANSWER:\n'+t.c.text+'\n\n'):'')+'RAW:\n'+(t.o.err||t.o.raw||'(empty)').slice(0,4000))}</pre></details>`).join('')+`</div>`).join('') || '<p>Nothing yet.</p>';
+}
+function verdict(){
+  const by = {}; report.forEach(r=>r.tests.filter(t=>t.research).forEach(t=>{(by[r.model]=by[r.model]||{})[r.mode]=t.c;}));
+  const lines = [];
+  Object.entries(by).forEach(([m,v])=>{
+    const s=v.site, d=v.direct;
+    if(s&&s.k==='ok') lines.push(`<b>${esc(m)}</b>: works through your site. The app can use it.`);
+    else if(s&&d&&d.k==='ok') lines.push(`<b>${esc(m)}</b>: works directly but fails through your site (${esc(s.t)}). Either the key saved in Vercel (GROQ_API_KEY) is not the key you pasted, or Vercel is cutting the call short. Check that the two keys match, then Vercel Logs for /api/groq (status and duration).`);
+    else if(s&&d) lines.push(`<b>${esc(m)}</b>: fails both ways (site: ${esc(s.t)}, direct: ${esc(d.t)}). The problem is Groq or the key, not Vercel.`);
+    else if(s) lines.push(`<b>${esc(m)}</b>: through your site: ${esc(s.t)}${s.k==='ok'?'':'. Add a Groq key above and run again to see whether Groq or Vercel is at fault.'}`);
+  });
+  $('verdict').innerHTML = lines.length?`<div class="verdict">${lines.join('<br>')}</div>`:'';
+}
+async function runTests(){
+  stop=false; report=[]; $('runBtn').disabled=true; $('stopBtn').disabled=false; render(); $('verdict').innerHTML='';
+  const models=[...document.querySelectorAll('#models input:checked')].map(x=>x.dataset.m);
+  const modes=['site']; if($('key').value.trim()) modes.push('direct');
+  let n=0; const total=models.length*modes.length;
+  for(const model of models){ for(const mode of modes){
+    if(stop) break; n++; $('prog').textContent=`Testing ${model} (${mode==='direct'?'direct':'site'}) · ${n} of ${total}…`;
+    const row={model,mode,tests:[]}; report.push(row); const isSearchModel=/^groq\/compound/.test(model); let plainOk=true;
+    if($('plain').checked){ const o=await call(mode,model,[{role:'user',content:'Reply with the single word OK.'}]); const c=classify(o,false); row.tests.push({label:'Plain answer',o,c}); plainOk=c.k==='ok'; render(); }
+    if(!stop && plainOk && isSearchModel){
+      $('prog').textContent=`Research test: ${model} (${mode==='direct'?'direct':'site'}), can take up to 90 s…`;
+      const o=await call(mode,model,[{role:'system',content:researchPrompt()},{role:'user',content:$('q').value.slice(0,700)}]); const c=classify(o,true);
+      row.tests.push({label:'Web research',o,c,research:true}); render();
+    } else if(!isSearchModel && !stop){ row.tests.push({label:'Web research',o:{ms:0,headers:{}},c:{k:'idle',t:'Not applicable',why:'This model is not used for searching.'}}); render(); }
+  } }
+  $('prog').textContent=stop?'Stopped.':'Finished.'; $('runBtn').disabled=false; $('stopBtn').disabled=true; verdict();
+}
+$('runBtn').onclick=runTests; $('stopBtn').onclick=()=>{stop=true; if(ctl) ctl.abort();};
+$('proxyBtn').onclick=async()=>{
+  const out=$('proxyOut'); out.textContent='Checking…';
+  try{
+    const r=await fetch($('site').value.replace(/\/+$/,'')+'/api/groq',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); const t=await r.text();
+    out.textContent = r.status===400 ? 'Proxy reachable and GROQ_API_KEY is set (it asked for "messages", as expected). Nothing was sent to Groq.'
+      : r.status===500 ? 'Proxy reachable but it says: '+t.slice(0,200)
+      : r.status===404 ? 'Got 404: /api/groq is not deployed on that address. Check the site address and that the api folder was in the last deploy.'
+      : 'Unexpected answer: HTTP '+r.status+' '+t.slice(0,200);
+  }catch(e){ out.textContent='Could not reach the site: '+(e&&e.message||e); }
+};
+$('copyBtn').onclick=async()=>{
+  const txt=report.map(r=>r.model+' ['+r.mode+']\n'+r.tests.map(t=>'  '+t.label+': '+t.c.t+' ('+(t.o.ms/1000).toFixed(1)+' s) '+(t.c.why||'')+(Object.keys(t.o.headers).length?' '+JSON.stringify(t.o.headers):'')).join('\n')).join('\n\n');
+  try{await navigator.clipboard.writeText(txt||'(no results)'); $('copyBtn').textContent='Copied';}catch(e){$('copyBtn').textContent='Copy failed';} setTimeout(()=>$('copyBtn').textContent='Copy results',1500);
+};
+</script></body></html>
